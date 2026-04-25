@@ -1,87 +1,83 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import anthropic
+import google.generativeai as genai
+import stripe
 import os
 
 app = Flask(__name__)
-CORS(app)  # Erlaubt Anfragen von deiner Netlify-Seite
+CORS(app)
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+
+STRIPE_PRICES = {
+        "normal": os.environ.get("STRIPE_PRICE_NORMAL", ""),
+        "pro":    os.environ.get("STRIPE_PRICE_PRO", ""),
+}
 
 PLANS = {
-    "normal": {"max_photos": 3, "hashtags": 8,  "detailed": False, "model": "claude-haiku-4-5-20251001"},
-    "pro":    {"max_photos": 5, "hashtags": 15, "detailed": True,  "model": "claude-sonnet-4-20250514"},
+        "normal": {"max_photos": 3, "model": "gemini-1.5-flash"},
+        "pro":    {"max_photos": 5, "model": "gemini-1.5-pro"},
 }
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    data = request.json
-    images   = data.get("images", [])
-    language = data.get("language", "DE")
-    plan     = data.get("plan", "normal")
+        data = request.json
+        images        = data.get("images", [])
+        language      = data.get("language", "EN")
+        plan          = data.get("plan", "normal")
+        custom_prompt = data.get("customPrompt", "")
 
     plan_config = PLANS.get(plan, PLANS["normal"])
-    images = images[:plan_config["max_photos"]]  # Limit serverseitig durchsetzen
-    hashtag_count = plan_config["hashtags"]
-    detailed = plan_config["detailed"]
-    model = plan_config["model"]  # Haiku fuer Normal, Sonnet fuer Pro
+    images = images[:plan_config["max_photos"]]
+    model_name = plan_config["model"]
 
-    desc_instruction = (
-        "5-6 Saetze, sehr detailliert, verkaufsoptimiert" if detailed
-        else "3-4 Saetze, klar und praezise"
-    ) if language == "DE" else (
-        "5-6 sentences, very detailed, sales-optimized" if detailed
-        else "3-4 sentences, clear and precise"
+    if not custom_prompt:
+                custom_prompt = f"Analyze this item and create a marketplace listing in {'German' if language=='DE' else 'English'}. Reply ONLY with JSON: {{'title':'...','description':'...','price':'...EUR','priceReasoning':'...','category':'...','condition':'...','hashtags':[]}}"
+
+    parts = []
+    for img_b64 in images:
+                parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
+            parts.append(custom_prompt)
+
+    model = genai.GenerativeModel(model_name)
+    response = model.generate_content(parts)
+
+    text = response.text.strip()
+    if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                                text = text[4:]
+                        text = text.strip()
+
+    return jsonify({"result": text})
+
+
+@app.route("/create-checkout", methods=["POST"])
+def create_checkout():
+        data = request.json
+    plan = data.get("plan", "normal")
+    lang = data.get("lang", "EN")
+    price_id = STRIPE_PRICES.get(plan)
+    if not price_id:
+                return jsonify({"error": "Stripe not configured"}), 400
+    origin = request.headers.get("Origin", "https://easy2resell.netlify.app")
+    session = stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                line_items=[{"price": price_id, "quantity": 1}],
+                mode="subscription",
+                success_url=origin + "?success=1",
+                cancel_url=origin + "?canceled=1",
+                locale="de" if lang == "DE" else "en",
     )
-
-    if language == "DE":
-        prompt = f"""Analysiere dieses Kleidungsstueck und generiere ein perfektes Vinted-Inserat auf Deutsch.
-
-Antworte NUR mit diesem JSON (kein Text davor oder danach):
-{{
-  "title": "Praegnanter Titel max 50 Zeichen",
-  "description": "{desc_instruction}",
-  "price": "25EUR",
-  "priceReasoning": "Kurze Begruendung fuer den Preis",
-  "category": "z.B. Jacken",
-  "condition": "Neu / Sehr gut / Gut / Akzeptabel",
-  "hashtags": ["tag1","tag2","tag3","tag4","tag5","tag6","tag7","tag8"{',\"tag9\",\"tag10\",\"tag11\",\"tag12\",\"tag13\",\"tag14\",\"tag15\"' if hashtag_count > 8 else ''}]
-}}"""
-    else:
-        prompt = f"""Analyze this clothing item and generate a perfect Vinted listing in English.
-
-Respond ONLY with this JSON (no text before or after):
-{{
-  "title": "Catchy title max 50 chars",
-  "description": "{desc_instruction}",
-  "price": "EUR25",
-  "priceReasoning": "Brief reasoning for the price",
-  "category": "e.g. Jackets",
-  "condition": "New / Very Good / Good / Acceptable",
-  "hashtags": ["tag1","tag2","tag3","tag4","tag5","tag6","tag7","tag8"{',\"tag9\",\"tag10\",\"tag11\",\"tag12\",\"tag13\",\"tag14\",\"tag15\"' if hashtag_count > 8 else ''}]
-}}"""
-
-    content = [
-        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img}}
-        for img in images
-    ]
-    content.append({"type": "text", "text": prompt})
-
-    message = client.messages.create(
-        model=model,
-        max_tokens=1500,
-        messages=[{"role": "user", "content": content}]
-    )
-
-    result_text = message.content[0].text
-    return jsonify({"result": result_text})
+    return jsonify({"url": session.url})
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+        return jsonify({"status": "ok", "model": "gemini"})
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+        port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
