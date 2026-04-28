@@ -7,7 +7,7 @@ import os
 app = Flask(__name__)
 CORS(app)
 
-genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"], api_version="v1")
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 STRIPE_PRICES = {
