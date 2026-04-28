@@ -5,18 +5,9 @@ import stripe
 import os
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# CORS mit allen erlaubten Origins
-CORS(app, 
-     origins=["https://easy2resell.de", "https://www.easy2resell.de", "https://easy2resell.netlify.app", "http://localhost:3000", "http://localhost:8000"],
-     methods=["GET", "POST", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization"],
-     supports_credentials=True)
-
-# Alternative: Wildcard CORS (weniger sicher aber funktioniert)
-# CORS(app, resources={r"/*": {"origins": "*"}})
-
-genai.configure(api_key=os.environ["GOOGLE_API_KEY"], api_version="v1")
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 
 STRIPE_PRICES = {
@@ -29,11 +20,8 @@ PLANS = {
     "pro": {"max_photos": 5, "model": "gemini-1.5-pro"},
 }
 
-@app.route("/analyze", methods=["POST", "OPTIONS"])
+@app.route("/analyze", methods=["POST"])
 def analyze():
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-    
     try:
         data = request.json
         images = data.get("images", [])
@@ -66,11 +54,8 @@ def analyze():
         print(f"ERROR: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/create-checkout", methods=["POST", "OPTIONS"])
+@app.route("/create-checkout", methods=["POST"])
 def create_checkout():
-    if request.method == "OPTIONS":
-        return jsonify({}), 200
-    
     try:
         data = request.json
         plan = data.get("plan", "normal")
