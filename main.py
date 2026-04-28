@@ -5,7 +5,16 @@ import stripe
 import os
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": ["https://easy2resell.de", "https://www.easy2resell.de", "https://easy2resell.netlify.app", "http://localhost:*"], "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type"]}})
+
+# CORS mit allen erlaubten Origins
+CORS(app, 
+     origins=["https://easy2resell.de", "https://www.easy2resell.de", "https://easy2resell.netlify.app", "http://localhost:3000", "http://localhost:8000"],
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization"],
+     supports_credentials=True)
+
+# Alternative: Wildcard CORS (weniger sicher aber funktioniert)
+# CORS(app, resources={r"/*": {"origins": "*"}})
 
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"], api_version="v1")
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -20,53 +29,75 @@ PLANS = {
     "pro": {"max_photos": 5, "model": "gemini-1.5-pro"},
 }
 
-@app.route("/analyze", methods=["POST"])
+@app.route("/analyze", methods=["POST", "OPTIONS"])
 def analyze():
-    data = request.json
-    images = data.get("images", [])
-    plan = data.get("plan", "normal")
-    custom_prompt = data.get("customPrompt", "")
-    plan_config = PLANS.get(plan, PLANS["normal"])
-    images = images[:plan_config["max_photos"]]
-    model_name = plan_config["model"]
-    if not custom_prompt:
-        custom_prompt = "Analyze this item and create a marketplace listing. Reply ONLY with valid JSON containing: title, description, price, priceReasoning, category, condition, hashtags"
-    parts = []
-    for img_b64 in images:
-        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
-    parts.append(custom_prompt)
-    model = genai.GenerativeModel(model_name)
-    response = model.generate_content(parts)
-    text = response.text.strip()
-    if "```" in text:
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return jsonify({"result": text.strip()})
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    
+    try:
+        data = request.json
+        images = data.get("images", [])
+        plan = data.get("plan", "normal")
+        custom_prompt = data.get("customPrompt", "")
+        
+        plan_config = PLANS.get(plan, PLANS["normal"])
+        images = images[:plan_config["max_photos"]]
+        model_name = plan_config["model"]
+        
+        if not custom_prompt:
+            custom_prompt = "Analyze this item and create a listing. Reply ONLY with JSON: {title, description, price, priceReasoning, category, condition, hashtags}"
+        
+        parts = []
+        for img_b64 in images:
+            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
+        parts.append(custom_prompt)
+        
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(parts)
+        text = response.text.strip()
+        
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        
+        return jsonify({"result": text.strip()}), 200
+    except Exception as e:
+        print(f"ERROR: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
-@app.route("/create-checkout", methods=["POST"])
+@app.route("/create-checkout", methods=["POST", "OPTIONS"])
 def create_checkout():
-    data = request.json
-    plan = data.get("plan", "normal")
-    lang = data.get("lang", "EN")
-    price_id = STRIPE_PRICES.get(plan)
-    if not price_id:
-        return jsonify({"error": "Stripe not configured"}), 400
-    origin = request.headers.get("Origin", "https://easy2resell.netlify.app")
-    session = stripe.checkout.Session.create(
-        payment_method_types=["card"],
-        line_items=[{"price": price_id, "quantity": 1}],
-        mode="subscription",
-        success_url=origin + "?success=1",
-        cancel_url=origin + "?canceled=1",
-        locale="de" if lang == "DE" else "en",
-    )
-    return jsonify({"url": session.url})
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    
+    try:
+        data = request.json
+        plan = data.get("plan", "normal")
+        lang = data.get("lang", "EN")
+        price_id = STRIPE_PRICES.get(plan)
+        
+        if not price_id:
+            return jsonify({"error": "Stripe not configured"}), 400
+        
+        origin = request.headers.get("Origin", "https://easy2resell.netlify.app")
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            mode="subscription",
+            success_url=origin + "?success=1",
+            cancel_url=origin + "?canceled=1",
+            locale="de" if lang == "DE" else "en",
+        )
+        return jsonify({"url": session.url}), 200
+    except Exception as e:
+        print(f"ERROR: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "model": "gemini"})
+    return jsonify({"status": "ok", "model": "gemini"}), 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False)
