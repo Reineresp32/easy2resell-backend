@@ -5,7 +5,7 @@ import stripe
 import os
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": ["https://easy2resell.de", "https://www.easy2resell.de", "https://easy2resell.netlify.app", "http://localhost:*"], "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type"]}})
 
 genai.configure(api_key=os.environ["GOOGLE_API_KEY"], api_version="v1")
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
