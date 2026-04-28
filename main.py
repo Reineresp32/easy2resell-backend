@@ -30,7 +30,7 @@ def analyze():
     images = images[:plan_config["max_photos"]]
     model_name = plan_config["model"]
     if not custom_prompt:
-        custom_prompt = "Analyze this item and create a listing. Reply ONLY with JSON: {title, description, price, priceReasoning, category, condition, hashtags}"
+        custom_prompt = "Analyze this item and create a marketplace listing. Reply ONLY with valid JSON containing: title, description, price, priceReasoning, category, condition, hashtags"
     parts = []
     for img_b64 in images:
         parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
