@@ -163,9 +163,8 @@ Antworte NUR mit einem JSON-Objekt (kein Markdown):
 # ═══════════════════════════════════════════
 
 def supabase_save_token(user_id, access_token, refresh_token, expires_at, ebay_user_id=''):
-    """Speichert eBay Token in Supabase ebay_tokens Tabelle."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        print("[WARN] Supabase not configured, skipping token save")
+        print(f"[Supabase] Missing config: URL={bool(SUPABASE_URL)}, KEY={bool(SUPABASE_SERVICE_KEY)}")
         return False
     try:
         resp = requests.post(
@@ -186,9 +185,10 @@ def supabase_save_token(user_id, access_token, refresh_token, expires_at, ebay_u
             },
             timeout=5
         )
+        print(f"[Supabase] Save token response: {resp.status_code} {resp.text[:200]}")
         return resp.status_code in [200, 201, 204]
     except Exception as e:
-        print(f"[ERROR] Supabase save token: {e}")
+        print(f"[Supabase] Save token error: {e}")
         return False
 
 
