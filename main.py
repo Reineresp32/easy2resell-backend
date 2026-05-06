@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import google.generativeai as genai
@@ -7,23 +7,26 @@ import base64
 import os
 import json
 import hashlib
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
 # ═══════════════════════════════════════════
-# eBay MARKETPLACE ACCOUNT DELETION CONFIG
+# CONFIG — alle Keys kommen aus Railway Env Vars
 # ═══════════════════════════════════════════
-# Verification Token: zufaelliger 32-80 Zeichen String, identisch mit dem Wert in der eBay Developer Console
-EBAY_VERIFICATION_TOKEN = os.environ.get(
-    'EBAY_VERIFICATION_TOKEN',
-    'easy2resell-ebay-verification-token-2026-secure-string-do-not-share'
-)
-# Endpoint URL — muss exakt mit der in eBay Developer Console hinterlegten URL uebereinstimmen
-EBAY_ENDPOINT_URL = os.environ.get(
-    'EBAY_ENDPOINT_URL',
-    'https://web-production-c1b1b.up.railway.app/ebay-deletion'
-)
+GOOGLE_API_KEY       = os.environ.get('GOOGLE_API_KEY', '')
+EBAY_CLIENT_ID       = os.environ.get('EBAY_CLIENT_ID', '')
+EBAY_CLIENT_SECRET   = os.environ.get('EBAY_CLIENT_SECRET', '')
+EBAY_RUNAME          = os.environ.get('EBAY_RUNAME', '')
+EBAY_VERIFICATION_TOKEN = os.environ.get('EBAY_VERIFICATION_TOKEN', '')
+EBAY_ENDPOINT_URL    = os.environ.get('EBAY_ENDPOINT_URL', 'https://web-production-c1b1b.up.railway.app/ebay-deletion')
+SUPABASE_URL         = os.environ.get('SUPABASE_URL', '')
+SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')  # Service Role Key (nicht der public key!)
+FRONTEND_URL         = os.environ.get('FRONTEND_URL', 'https://easy2resell.de')
+
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
 # ═══════════════════════════════════════════
 # RATE LIMITING
@@ -51,13 +54,6 @@ def options(path):
     return jsonify({}), 200
 
 # ═══════════════════════════════════════════
-# GEMINI SETUP
-# ═══════════════════════════════════════════
-GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', '')
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
-
-# ═══════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════
 @app.route('/health', methods=['GET'])
@@ -65,7 +61,8 @@ def health():
     return jsonify({
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "3.0"
+        "version": "4.0",
+        "ebay_configured": bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET and EBAY_RUNAME)
     })
 
 # ═══════════════════════════════════════════
@@ -103,22 +100,16 @@ def analyze():
     model_name = 'gemini-2.5-pro' if plan == 'pro' else 'gemini-2.5-flash'
 
     try:
-        # ── SCHRITT 1: Artikel identifizieren ──
+        # Schritt 1: Artikel identifizieren
         identify_model = genai.GenerativeModel(model_name)
-        identify_parts = []
-        for img_b64 in images:
-            identify_parts.append({
-                "inline_data": {"mime_type": "image/jpeg", "data": img_b64}
-            })
+        identify_parts = [{"inline_data": {"mime_type": "image/jpeg", "data": img}} for img in images]
         identify_parts.append(
-            "Identifiziere diesen Artikel in einem kurzen Satz: Marke, Typ, Farbe, Zustand, Groesse falls erkennbar. "
-            "Beispiel: 'Nike Air Force 1 Sneaker weiss Groesse 42 neuwertig'"
+            "Identifiziere diesen Artikel in einem kurzen Satz: Marke, Typ, Farbe, Zustand, Groesse falls erkennbar."
         )
-        identify_response = identify_model.generate_content(identify_parts)
-        item_description = identify_response.text.strip()
+        item_description = identify_model.generate_content(identify_parts).text.strip()
         print(f"[INFO] Item: {item_description}")
 
-        # ── SCHRITT 2: Live-Preisrecherche mit Google Search ──
+        # Schritt 2: Live-Preisrecherche
         price_context = ""
         try:
             search_model = genai.GenerativeModel(
@@ -126,125 +117,450 @@ def analyze():
                 tools=[types.Tool(google_search=types.GoogleSearch())]
             )
             search_prompt = (
-                f"Suche jetzt auf vinted.de und ebay.de/kleinanzeigen nach aktuellen Verkaufspreisen fuer: {item_description}\n"
-                f"Finde echte aktuelle Angebote. Gib mir:\n"
-                f"1. Preisspanne der gefundenen Angebote (z.B. 35-65 Euro)\n"
-                f"2. Empfohlener Verkaufspreis\n"
-                f"3. Kurze Begruendung\n"
-                f"Antworte auf Deutsch in 2-3 Saetzen."
+                f"Suche jetzt auf vinted.de und ebay.de nach aktuellen Verkaufspreisen fuer: {item_description}\n"
+                f"Gib mir Preisspanne, empfohlenen Preis und kurze Begruendung auf Deutsch in 2-3 Saetzen."
             )
             search_response = search_model.generate_content(search_prompt)
-            price_context = f"\n\nLIVE MARKTPREISE (gerade recherchiert auf Vinted/eBay):\n{search_response.text.strip()}\n\nNutze diese echten Marktpreise fuer deine Preisempfehlung."
-            print(f"[INFO] Price research: {search_response.text[:100]}")
+            price_context = f"\n\nLIVE MARKTPREISE:\n{search_response.text.strip()}\n\nNutze diese Preise als Basis."
         except Exception as se:
             print(f"[WARN] Search failed: {se}")
-            price_context = "\n\nPREISREGEL: Neu mit Etikett = 40-60% UVP. Neuwertig Markenartikel = 30-50% UVP. Niemals unter Marktwert einpreisen."
+            price_context = "\n\nPREISREGEL: Neu mit Etikett = 40-60% UVP. Neuwertig = 30-50% UVP."
 
-        # ── SCHRITT 3: Inserat generieren ──
+        # Schritt 3: Inserat generieren
         listing_model = genai.GenerativeModel(model_name)
-        listing_parts = []
-        for img_b64 in images:
-            listing_parts.append({
-                "inline_data": {"mime_type": "image/jpeg", "data": img_b64}
-            })
-
+        listing_parts = [{"inline_data": {"mime_type": "image/jpeg", "data": img}} for img in images]
         prompt = custom_prompt if custom_prompt else f"""
 Analysiere diesen Artikel und erstelle ein optimiertes Inserat fuer deutsche Marketplace-Plattformen.
 {price_context}
 
-Antworte NUR mit einem JSON-Objekt (kein Markdown, keine Erklaerungen):
+Antworte NUR mit einem JSON-Objekt (kein Markdown):
 {{
   "title": "Praegnanter Titel (max 60 Zeichen)",
   "price": REALISTISCHER_PREIS_ALS_ZAHL,
-  "priceReason": "Begruendung mit konkreten Vergleichspreisen aus der Live-Recherche",
+  "priceReason": "Begruendung mit Vergleichspreisen",
   "description": "Verkaufsorientierte Beschreibung (3-5 Saetze)",
   "category": "Kategorie",
-  "condition": "Zustand (Neu mit Etikett/Neu ohne Etikett/Sehr gut/Gut/Akzeptabel)",
+  "condition": "Neu mit Etikett/Neu ohne Etikett/Sehr gut/Gut/Akzeptabel",
   "brand": "Marke oder Unbekannt",
   "material": "Material falls erkennbar",
   "hashtags": ["tag1", "tag2", "tag3", "tag4", "tag5"]
 }}
 """
         listing_parts.append(prompt)
-        listing_response = listing_model.generate_content(listing_parts)
-        result_text = listing_response.text
-
+        result_text = listing_model.generate_content(listing_parts).text
         return jsonify({"result": result_text})
 
     except Exception as e:
         error_msg = str(e)
-        print(f"[ERROR] {datetime.utcnow().isoformat()} — {error_msg}")
+        print(f"[ERROR] {datetime.utcnow().isoformat()} - {error_msg}")
         if 'quota' in error_msg.lower() or '429' in error_msg:
             return jsonify({"error": "Rate limit reached, please try again later"}), 429
         return jsonify({"error": "Analysis failed: " + error_msg}), 500
 
 
 # ═══════════════════════════════════════════
+# eBay OAUTH FLOW
+# ═══════════════════════════════════════════
+
+def supabase_save_token(user_id, access_token, refresh_token, expires_at, ebay_user_id=''):
+    """Speichert eBay Token in Supabase ebay_tokens Tabelle."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        print("[WARN] Supabase not configured, skipping token save")
+        return False
+    try:
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/ebay_tokens",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            },
+            json={
+                "user_id": user_id,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "expires_at": expires_at,
+                "ebay_user_id": ebay_user_id,
+                "updated_at": datetime.utcnow().isoformat()
+            },
+            timeout=5
+        )
+        return resp.status_code in [200, 201, 204]
+    except Exception as e:
+        print(f"[ERROR] Supabase save token: {e}")
+        return False
+
+
+def supabase_get_token(user_id):
+    """Holt eBay Token aus Supabase."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return None
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/ebay_tokens?user_id=eq.{user_id}&limit=1",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"
+            },
+            timeout=5
+        )
+        data = resp.json()
+        return data[0] if data else None
+    except Exception as e:
+        print(f"[ERROR] Supabase get token: {e}")
+        return None
+
+
+def refresh_ebay_token(refresh_token):
+    """Erneuert einen abgelaufenen eBay Access Token."""
+    credentials = base64.b64encode(f"{EBAY_CLIENT_ID}:{EBAY_CLIENT_SECRET}".encode()).decode()
+    resp = requests.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": "https://api.ebay.com/oauth/api_scope/sell.item"
+        },
+        timeout=10
+    )
+    if resp.status_code == 200:
+        return resp.json()
+    return None
+
+
+@app.route('/ebay-auth', methods=['GET'])
+def ebay_auth():
+    """
+    Leitet den Nutzer zur eBay Login-Seite weiter.
+    Aufruf: GET /ebay-auth?user_id=SUPABASE_USER_ID
+    """
+    user_id = request.args.get('user_id', '')
+    if not user_id:
+        return jsonify({"error": "Missing user_id"}), 400
+
+    if not EBAY_CLIENT_ID or not EBAY_RUNAME:
+        return jsonify({"error": "eBay not configured"}), 500
+
+    # State = user_id damit wir im Callback wissen wer es ist
+    state = base64.b64encode(user_id.encode()).decode()
+
+    auth_url = (
+        f"https://auth.ebay.com/oauth2/authorize"
+        f"?client_id={EBAY_CLIENT_ID}"
+        f"&response_type=code"
+        f"&redirect_uri={EBAY_RUNAME}"
+        f"&scope=https://api.ebay.com/oauth/api_scope"
+        f"%20https://api.ebay.com/oauth/api_scope/sell.inventory"
+        f"%20https://api.ebay.com/oauth/api_scope/sell.account"
+        f"&state={state}"
+    )
+    return redirect(auth_url)
+
+
+@app.route('/ebay-callback', methods=['GET'])
+def ebay_callback():
+    """
+    eBay leitet nach Login hierher weiter.
+    Tauscht den Code gegen Access + Refresh Token.
+    """
+    code  = request.args.get('code', '')
+    state = request.args.get('state', '')
+    error = request.args.get('error', '')
+
+    if error:
+        return redirect(f"{FRONTEND_URL}?ebay=declined")
+
+    if not code:
+        return redirect(f"{FRONTEND_URL}?ebay=error&reason=no_code")
+
+    # User ID aus State dekodieren
+    try:
+        user_id = base64.b64decode(state.encode()).decode()
+    except Exception:
+        return redirect(f"{FRONTEND_URL}?ebay=error&reason=invalid_state")
+
+    # Code gegen Token tauschen
+    credentials = base64.b64encode(f"{EBAY_CLIENT_ID}:{EBAY_CLIENT_SECRET}".encode()).decode()
+    try:
+        token_resp = requests.post(
+            "https://api.ebay.com/identity/v1/oauth2/token",
+            headers={
+                "Authorization": f"Basic {credentials}",
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": EBAY_RUNAME
+            },
+            timeout=10
+        )
+
+        if token_resp.status_code != 200:
+            print(f"[ERROR] eBay token exchange failed: {token_resp.text}")
+            return redirect(f"{FRONTEND_URL}?ebay=error&reason=token_exchange")
+
+        token_data = token_resp.json()
+        access_token  = token_data.get('access_token', '')
+        refresh_token = token_data.get('refresh_token', '')
+        expires_in    = token_data.get('expires_in', 7200)
+        expires_at    = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
+
+        # Token in Supabase speichern
+        saved = supabase_save_token(user_id, access_token, refresh_token, expires_at)
+        if not saved:
+            print(f"[WARN] Token not saved to Supabase for user {user_id}")
+
+        print(f"[eBay] OAuth successful for user {user_id[:8]}...")
+        return redirect(f"{FRONTEND_URL}?ebay=connected")
+
+    except Exception as e:
+        print(f"[ERROR] eBay callback: {e}")
+        return redirect(f"{FRONTEND_URL}?ebay=error&reason=exception")
+
+
+# ═══════════════════════════════════════════
+# eBay LISTING ERSTELLEN
+# ═══════════════════════════════════════════
+@app.route('/ebay-list', methods=['POST'])
+@limiter.limit("30 per hour")
+def ebay_list():
+    """
+    Erstellt ein eBay Listing mit dem gespeicherten Token des Nutzers.
+    Body: {
+      user_id: "supabase-user-id",
+      title: "Titel",
+      description: "Beschreibung",
+      price: 29.99,
+      condition: "LIKE_NEW",
+      category_id: "11450",
+      images: ["base64..."]  (optional, max 12)
+    }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid request body"}), 400
+
+    user_id = data.get('user_id', '')
+    if not user_id:
+        return jsonify({"error": "Missing user_id"}), 400
+
+    # Token holen
+    token_row = supabase_get_token(user_id)
+    if not token_row:
+        return jsonify({"error": "eBay not connected", "action": "connect"}), 401
+
+    access_token = token_row.get('access_token', '')
+    refresh_token = token_row.get('refresh_token', '')
+    expires_at = token_row.get('expires_at', '')
+
+    # Token erneuern falls abgelaufen
+    if expires_at:
+        try:
+            expires_dt = datetime.fromisoformat(expires_at.replace('Z', ''))
+            if datetime.utcnow() >= expires_dt - timedelta(minutes=5):
+                new_tokens = refresh_ebay_token(refresh_token)
+                if new_tokens:
+                    access_token = new_tokens.get('access_token', access_token)
+                    new_expires_at = (datetime.utcnow() + timedelta(seconds=new_tokens.get('expires_in', 7200))).isoformat()
+                    supabase_save_token(user_id, access_token, new_tokens.get('refresh_token', refresh_token), new_expires_at)
+                else:
+                    return jsonify({"error": "eBay token expired, please reconnect", "action": "reconnect"}), 401
+        except Exception as ex:
+            print(f"[WARN] Token expiry check failed: {ex}")
+
+    # Condition Mapping
+    condition_map = {
+        "Neu mit Etikett": "NEW",
+        "Neu ohne Etikett": "NEW",
+        "Sehr gut": "LIKE_NEW",
+        "Gut": "GOOD",
+        "Akzeptabel": "ACCEPTABLE"
+    }
+    condition = condition_map.get(data.get('condition', ''), "LIKE_NEW")
+
+    # eBay Listing Payload (Inventory Item API)
+    title = data.get('title', '')[:80]  # eBay max 80 Zeichen
+    description = data.get('description', '')
+    price = float(data.get('price', 0))
+    category_id = str(data.get('category_id', '11450'))  # 11450 = Kleidung Damen
+
+    # Zuerst Inventory Item anlegen
+    sku = f"e2r-{user_id[:8]}-{int(datetime.utcnow().timestamp())}"
+
+    inventory_payload = {
+        "condition": condition,
+        "product": {
+            "title": title,
+            "description": description,
+            "aspects": {}
+        },
+        "availability": {
+            "shipToLocationAvailability": {
+                "quantity": 1
+            }
+        }
+    }
+
+    try:
+        # 1. Inventory Item erstellen
+        inv_resp = requests.put(
+            f"https://api.ebay.com/sell/inventory/v1/inventory_item/{sku}",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "Content-Language": "de-DE",
+                "Accept-Language": "de-DE"
+            },
+            json=inventory_payload,
+            timeout=15
+        )
+
+        if inv_resp.status_code not in [200, 201, 204]:
+            print(f"[ERROR] eBay inventory: {inv_resp.status_code} {inv_resp.text[:200]}")
+            return jsonify({"error": "eBay inventory creation failed", "detail": inv_resp.text[:200]}), 500
+
+        # 2. Offer erstellen (Listing)
+        offer_payload = {
+            "sku": sku,
+            "marketplaceId": "EBAY_DE",
+            "format": "FIXED_PRICE",
+            "listingDescription": description,
+            "pricingSummary": {
+                "price": {
+                    "value": str(price),
+                    "currency": "EUR"
+                }
+            },
+            "categoryId": category_id,
+            "merchantLocationKey": "default",
+            "listingPolicies": {}
+        }
+
+        offer_resp = requests.post(
+            "https://api.ebay.com/sell/inventory/v1/offer",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "Content-Language": "de-DE"
+            },
+            json=offer_payload,
+            timeout=15
+        )
+
+        if offer_resp.status_code not in [200, 201]:
+            print(f"[ERROR] eBay offer: {offer_resp.status_code} {offer_resp.text[:200]}")
+            return jsonify({"error": "eBay offer creation failed", "detail": offer_resp.text[:200]}), 500
+
+        offer_id = offer_resp.json().get('offerId', '')
+
+        # 3. Offer publizieren
+        pub_resp = requests.post(
+            f"https://api.ebay.com/sell/inventory/v1/offer/{offer_id}/publish",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            },
+            timeout=15
+        )
+
+        if pub_resp.status_code not in [200, 201]:
+            print(f"[ERROR] eBay publish: {pub_resp.status_code} {pub_resp.text[:200]}")
+            return jsonify({"error": "eBay publish failed", "detail": pub_resp.text[:200]}), 500
+
+        listing_id = pub_resp.json().get('listingId', '')
+        listing_url = f"https://www.ebay.de/itm/{listing_id}"
+
+        print(f"[eBay] Listing created: {listing_url}")
+        return jsonify({
+            "success": True,
+            "listing_id": listing_id,
+            "listing_url": listing_url,
+            "sku": sku
+        })
+
+    except Exception as e:
+        print(f"[ERROR] eBay listing: {e}")
+        return jsonify({"error": "eBay listing failed: " + str(e)}), 500
+
+
+# ═══════════════════════════════════════════
+# eBay CONNECTION STATUS
+# ═══════════════════════════════════════════
+@app.route('/ebay-status', methods=['GET'])
+def ebay_status():
+    """Prueft ob ein Nutzer eBay verbunden hat."""
+    user_id = request.args.get('user_id', '')
+    if not user_id:
+        return jsonify({"connected": False}), 400
+
+    token_row = supabase_get_token(user_id)
+    if not token_row:
+        return jsonify({"connected": False})
+
+    expires_at = token_row.get('expires_at', '')
+    is_expired = False
+    if expires_at:
+        try:
+            expires_dt = datetime.fromisoformat(expires_at.replace('Z', ''))
+            is_expired = datetime.utcnow() >= expires_dt
+        except Exception:
+            pass
+
+    return jsonify({
+        "connected": True,
+        "expired": is_expired,
+        "ebay_user_id": token_row.get('ebay_user_id', '')
+    })
+
+
+# ═══════════════════════════════════════════
 # eBay MARKETPLACE ACCOUNT DELETION
 # ═══════════════════════════════════════════
-# Doku: https://developer.ebay.com/marketplace-account-deletion
-#
-# eBay sendet 2 Arten von Requests:
-# 1) GET mit ?challenge_code=XYZ  -> wir antworten mit SHA256(challenge + token + endpoint)
-# 2) POST mit Lösch-Notification  -> wir loeschen die Nutzerdaten und antworten 200/204
-
 @app.route('/ebay-deletion', methods=['GET'])
 def ebay_deletion_challenge():
-    """
-    Validation-Endpoint: eBay sendet einen Challenge-Code, wir antworten mit Hash.
-    Hash = SHA256( challenge_code + verification_token + endpoint_url )
-    """
     challenge_code = request.args.get('challenge_code', '')
     if not challenge_code:
         return jsonify({"error": "Missing challenge_code"}), 400
 
     raw = challenge_code + EBAY_VERIFICATION_TOKEN + EBAY_ENDPOINT_URL
     challenge_response = hashlib.sha256(raw.encode('utf-8')).hexdigest()
-
-    print(f"[eBay] Challenge received: {challenge_code[:20]}... → response generated")
-
+    print(f"[eBay] Challenge: {challenge_code[:20]}...")
     return jsonify({"challengeResponse": challenge_response}), 200
 
 
 @app.route('/ebay-deletion', methods=['POST'])
 def ebay_deletion_notification():
-    """
-    Notification-Endpoint: eBay sendet Lösch-Events.
-    Payload-Beispiel:
-      {
-        "metadata": {...},
-        "notification": {
-          "data": {
-            "username": "ebay_user",
-            "userId": "123",
-            "eiasToken": "..."
-          }
-        }
-      }
-    Wir bestätigen mit 200/204 — eBay erwartet eine Antwort innerhalb von 3 Sekunden.
-    """
     try:
         data = request.get_json(silent=True) or {}
         notification = data.get('notification', {})
         user_data = notification.get('data', {})
         username = user_data.get('username', 'unknown')
         user_id = user_data.get('userId', 'unknown')
+        print(f"[eBay] Deletion: user={username}, id={user_id}")
 
-        print(f"[eBay] Account deletion notification: user={username}, id={user_id}")
-
-        # ── Hier die Nutzerdaten aus der eigenen DB löschen ──
-        # Wir speichern aktuell keine eBay-Userdaten persistent.
-        # Sobald wir eBay-OAuth-Tokens speichern, hier per user_id löschen:
-        #
-        # supabase.from_('ebay_tokens').delete().eq('ebay_user_id', user_id).execute()
-        #
-        # Fuer jetzt: einfach loggen und 200 antworten.
+        # eBay Token aus Supabase loeschen
+        if SUPABASE_URL and SUPABASE_SERVICE_KEY and user_id != 'unknown':
+            try:
+                requests.delete(
+                    f"{SUPABASE_URL}/rest/v1/ebay_tokens?ebay_user_id=eq.{user_id}",
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"
+                    },
+                    timeout=5
+                )
+            except Exception:
+                pass
 
         return jsonify({"status": "received"}), 200
-
     except Exception as e:
-        print(f"[eBay] Deletion notification error: {e}")
-        # Wir antworten trotzdem 200, damit eBay nicht retry-storms macht
+        print(f"[eBay] Deletion error: {e}")
         return jsonify({"status": "error_logged"}), 200
 
 
@@ -255,7 +571,6 @@ def ebay_deletion_notification():
 def ratelimit_handler(e):
     return jsonify({
         "error": "Too many requests",
-        "message": "Rate limit exceeded. Please try again later.",
         "retry_after": str(e.description)
     }), 429
 
