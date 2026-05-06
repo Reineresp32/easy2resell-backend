@@ -114,7 +114,7 @@ def analyze():
         try:
             search_model = genai.GenerativeModel(
                 model_name,
-                tools=[types.Tool(google_search=types.GoogleSearch())]
+                tools="google_search_retrieval"
             )
             search_prompt = (
                 f"Suche jetzt auf vinted.de und ebay.de nach aktuellen Verkaufspreisen fuer: {item_description}\n"
@@ -362,8 +362,19 @@ def ebay_list():
     # Token erneuern falls abgelaufen
     if expires_at:
         try:
-            expires_dt = datetime.fromisoformat(expires_at.replace('Z', ''))
-            if datetime.utcnow() >= expires_dt - timedelta(minutes=5):
+            # Timezone-safe Vergleich
+            expires_str = expires_at.replace('Z', '+00:00') if expires_at.endswith('Z') else expires_at
+            try:
+                from datetime import timezone
+                expires_dt = datetime.fromisoformat(expires_str)
+                now = datetime.now(timezone.utc)
+            except Exception:
+                expires_dt = datetime.fromisoformat(expires_at.replace('Z', ''))
+                now = datetime.utcnow()
+                expires_dt = expires_dt.replace(tzinfo=None)
+                now = now.replace(tzinfo=None)
+
+            if now >= expires_dt - timedelta(minutes=5):
                 new_tokens = refresh_ebay_token(refresh_token)
                 if new_tokens:
                     access_token = new_tokens.get('access_token', access_token)
@@ -438,7 +449,7 @@ def ebay_list():
                 }
             },
             "categoryId": category_id,
-            "merchantLocationKey": "default",
+            "merchantLocationKey": "easy2resell_default",
             "listingPolicies": {}
         }
 
@@ -520,8 +531,53 @@ def ebay_status():
 
 
 # ═══════════════════════════════════════════
-# eBay MARKETPLACE ACCOUNT DELETION
+# eBay MERCHANT LOCATION SETUP
 # ═══════════════════════════════════════════
+@app.route('/ebay-setup-location', methods=['POST'])
+def ebay_setup_location():
+    """Erstellt einmalig eine Merchant Location für den Nutzer."""
+    data = request.get_json(silent=True) or {}
+    user_id = data.get('user_id', '')
+    if not user_id:
+        return jsonify({"error": "Missing user_id"}), 400
+
+    token_row = supabase_get_token(user_id)
+    if not token_row:
+        return jsonify({"error": "eBay not connected"}), 401
+
+    access_token = token_row.get('access_token', '')
+
+    location_payload = {
+        "location": {
+            "address": {
+                "country": "DE"
+            }
+        },
+        "locationAdditionalInformation": "easy2resell seller location",
+        "locationTypes": ["WAREHOUSE"],
+        "merchantLocationStatus": "ENABLED",
+        "name": "easy2resell"
+    }
+
+    try:
+        resp = requests.put(
+            "https://api.ebay.com/sell/inventory/v1/location/easy2resell_default",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "Content-Language": "de-DE"
+            },
+            json=location_payload,
+            timeout=10
+        )
+        if resp.status_code in [200, 201, 204]:
+            return jsonify({"success": True})
+        return jsonify({"error": resp.text[:200]}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
 @app.route('/ebay-deletion', methods=['GET'])
 def ebay_deletion_challenge():
     challenge_code = request.args.get('challenge_code', '')
