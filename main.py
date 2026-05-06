@@ -535,7 +535,6 @@ def ebay_status():
 # ═══════════════════════════════════════════
 @app.route('/ebay-setup-location', methods=['POST'])
 def ebay_setup_location():
-    """Erstellt einmalig eine Merchant Location für den Nutzer."""
     data = request.get_json(silent=True) or {}
     user_id = data.get('user_id', '')
     if not user_id:
@@ -543,9 +542,11 @@ def ebay_setup_location():
 
     token_row = supabase_get_token(user_id)
     if not token_row:
+        print(f"[eBay Setup] No token found for user {user_id[:8]}")
         return jsonify({"error": "eBay not connected"}), 401
 
     access_token = token_row.get('access_token', '')
+    print(f"[eBay Setup] Creating location for user {user_id[:8]}...")
 
     location_payload = {
         "location": {
@@ -570,10 +571,12 @@ def ebay_setup_location():
             json=location_payload,
             timeout=10
         )
+        print(f"[eBay Setup] Location response: {resp.status_code} {resp.text[:200]}")
         if resp.status_code in [200, 201, 204]:
             return jsonify({"success": True})
-        return jsonify({"error": resp.text[:200]}), 500
+        return jsonify({"error": resp.text[:200], "status": resp.status_code}), 500
     except Exception as e:
+        print(f"[eBay Setup] Exception: {e}")
         return jsonify({"error": str(e)}), 500
 
 
