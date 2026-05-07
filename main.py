@@ -173,7 +173,7 @@ def supabase_save_token(user_id, access_token, refresh_token, expires_at, ebay_u
                 "apikey": SUPABASE_SERVICE_KEY,
                 "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                 "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates"
+                "Prefer": "resolution=merge-duplicates,return=minimal"
             },
             json={
                 "user_id": user_id,
@@ -186,7 +186,28 @@ def supabase_save_token(user_id, access_token, refresh_token, expires_at, ebay_u
             timeout=5
         )
         print(f"[Supabase] Save token response: {resp.status_code} {resp.text[:200]}")
-        return resp.status_code in [200, 201, 204]
+        if resp.status_code in [200, 201, 204]:
+            return True
+        # Fallback: PATCH wenn schon existiert
+        patch_resp = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/ebay_tokens?user_id=eq.{user_id}",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            },
+            json={
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "expires_at": expires_at,
+                "ebay_user_id": ebay_user_id,
+                "updated_at": datetime.utcnow().isoformat()
+            },
+            timeout=5
+        )
+        print(f"[Supabase] Patch token response: {patch_resp.status_code}")
+        return patch_resp.status_code in [200, 201, 204]
     except Exception as e:
         print(f"[Supabase] Save token error: {e}")
         return False
