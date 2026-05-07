@@ -440,6 +440,30 @@ def ebay_list():
     }
 
     try:
+        # 0. Location sicherstellen
+        loc_check = requests.get(
+            "https://api.ebay.com/sell/inventory/v1/location/easy2resell_default",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10
+        )
+        if loc_check.status_code != 200:
+            loc_create = requests.put(
+                "https://api.ebay.com/sell/inventory/v1/location/easy2resell_default",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                    "Content-Language": "de-DE"
+                },
+                json={
+                    "location": {"address": {"country": "DE"}},
+                    "locationTypes": ["WAREHOUSE"],
+                    "merchantLocationStatus": "ENABLED",
+                    "name": "easy2resell"
+                },
+                timeout=10
+            )
+            print(f"[eBay] Location create: {loc_create.status_code} {loc_create.text[:100]}")
+
         # 1. Inventory Item erstellen
         inv_resp = requests.put(
             f"https://api.ebay.com/sell/inventory/v1/inventory_item/{sku}",
