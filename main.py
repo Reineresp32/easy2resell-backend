@@ -22,8 +22,9 @@ EBAY_RUNAME          = os.environ.get('EBAY_RUNAME', '')
 EBAY_VERIFICATION_TOKEN = os.environ.get('EBAY_VERIFICATION_TOKEN', '')
 EBAY_ENDPOINT_URL    = os.environ.get('EBAY_ENDPOINT_URL', 'https://web-production-c1b1b.up.railway.app/ebay-deletion')
 SUPABASE_URL         = os.environ.get('SUPABASE_URL', '')
-SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')  # Service Role Key (nicht der public key!)
+SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
 FRONTEND_URL         = os.environ.get('FRONTEND_URL', 'https://easy2resell.de')
+REMOVEBG_API_KEY     = os.environ.get('REMOVEBG_API_KEY', '')
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
@@ -156,6 +157,43 @@ Antworte NUR mit einem JSON-Objekt (kein Markdown):
         if 'quota' in error_msg.lower() or '429' in error_msg:
             return jsonify({"error": "Rate limit reached, please try again later"}), 429
         return jsonify({"error": "Analysis failed: " + error_msg}), 500
+
+
+# ═══════════════════════════════════════════
+# REMOVE.BG — Hintergrund entfernen + Bild verbessern
+# ═══════════════════════════════════════════
+@app.route('/remove-background', methods=['POST'])
+@limiter.limit("30 per hour")
+def remove_background():
+    if not REMOVEBG_API_KEY:
+        return jsonify({"error": "remove.bg not configured"}), 500
+
+    data = request.get_json(silent=True)
+    if not data or not data.get('image'):
+        return jsonify({"error": "No image provided"}), 400
+
+    try:
+        img_bytes = base64.b64decode(data['image'])
+        if len(img_bytes) > 12 * 1024 * 1024:
+            return jsonify({"error": "Image too large (max 12MB)"}), 400
+
+        resp = requests.post(
+            'https://api.remove.bg/v1.0/removebg',
+            files={'image_file': ('image.jpg', img_bytes)},
+            data={'size': 'auto', 'format': 'png'},
+            headers={'X-Api-Key': REMOVEBG_API_KEY},
+            timeout=30
+        )
+
+        if resp.status_code == 200:
+            processed_b64 = base64.b64encode(resp.content).decode('utf-8')
+            return jsonify({"image": processed_b64})
+        else:
+            print(f"[remove.bg] Error: {resp.status_code} {resp.text[:200]}")
+            return jsonify({"error": f"remove.bg API error: {resp.status_code}"}), 500
+    except Exception as e:
+        print(f"[remove.bg] Exception: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # ═══════════════════════════════════════════
