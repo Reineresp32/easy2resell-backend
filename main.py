@@ -162,6 +162,48 @@ Antworte NUR mit einem JSON-Objekt (kein Markdown):
 # ═══════════════════════════════════════════
 # REMOVE.BG — Hintergrund entfernen + Bild verbessern
 # ═══════════════════════════════════════════
+REMOVEBG_MONTHLY_LIMIT = 25  # max Bilder pro Studio-Nutzer pro Monat
+
+def check_removebg_usage(user_id):
+    """Prueft wie viele remove.bg Calls der Nutzer diesen Monat gemacht hat."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return 0
+    try:
+        from datetime import timezone
+        month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/removebg_usage?user_id=eq.{user_id}&created_at=gte.{month_start}&select=count",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Prefer": "count=exact"
+            },
+            timeout=5
+        )
+        count = int(resp.headers.get('content-range', '0/0').split('/')[1])
+        return count
+    except Exception as e:
+        print(f"[removebg] Usage check error: {e}")
+        return 0
+
+def track_removebg_usage(user_id):
+    """Speichert einen remove.bg Call in Supabase."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/removebg_usage",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={"user_id": user_id},
+            timeout=5
+        )
+    except Exception as e:
+        print(f"[removebg] Usage track error: {e}")
+
 @app.route('/remove-background', methods=['POST'])
 @limiter.limit("30 per hour")
 def remove_background():
@@ -171,6 +213,27 @@ def remove_background():
     data = request.get_json(silent=True)
     if not data or not data.get('image'):
         return jsonify({"error": "No image provided"}), 400
+
+    user_id = data.get('user_id', '')
+    plan = data.get('plan', 'free')
+
+    # Nur Studio-Nutzer duerfen remove.bg nutzen
+    if plan != 'studio':
+        return jsonify({
+            "error": "Studio plan required",
+            "upgrade": True
+        }), 403
+
+    # Usage-Limit pruefen
+    if user_id:
+        usage = check_removebg_usage(user_id)
+        if usage >= REMOVEBG_MONTHLY_LIMIT:
+            return jsonify({
+                "error": f"Monatliches Limit erreicht ({REMOVEBG_MONTHLY_LIMIT} Bilder/Monat im Studio-Plan)",
+                "limit_reached": True,
+                "usage": usage,
+                "limit": REMOVEBG_MONTHLY_LIMIT
+            }), 429
 
     try:
         img_bytes = base64.b64decode(data['image'])
@@ -186,8 +249,14 @@ def remove_background():
         )
 
         if resp.status_code == 200:
+            if user_id:
+                track_removebg_usage(user_id)
             processed_b64 = base64.b64encode(resp.content).decode('utf-8')
-            return jsonify({"image": processed_b64})
+            return jsonify({
+                "image": processed_b64,
+                "usage": check_removebg_usage(user_id) if user_id else None,
+                "limit": REMOVEBG_MONTHLY_LIMIT
+            })
         else:
             print(f"[remove.bg] Error: {resp.status_code} {resp.text[:200]}")
             return jsonify({"error": f"remove.bg API error: {resp.status_code}"}), 500
