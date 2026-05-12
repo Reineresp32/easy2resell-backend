@@ -216,16 +216,37 @@ def remove_background():
 
     user_id = data.get('user_id', '')
     plan = data.get('plan', 'free')
+    admin_email = 'ben-koepke@web.de'
+
+    # Admin-Account: immer Studio-Zugang, kein Limit
+    is_admin = False
+    if user_id and SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        try:
+            resp_user = requests.get(
+                f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"
+                },
+                timeout=5
+            )
+            if resp_user.ok:
+                user_data = resp_user.json()
+                if user_data.get('email') == admin_email:
+                    is_admin = True
+                    plan = 'studio'
+        except Exception:
+            pass
 
     # Nur Studio-Nutzer duerfen remove.bg nutzen
-    if plan != 'studio':
+    if plan != 'studio' and not is_admin:
         return jsonify({
             "error": "Studio plan required",
             "upgrade": True
         }), 403
 
-    # Usage-Limit pruefen
-    if user_id:
+    # Usage-Limit pruefen (Admin ausgenommen)
+    if user_id and not is_admin:
         usage = check_removebg_usage(user_id)
         if usage >= REMOVEBG_MONTHLY_LIMIT:
             return jsonify({
