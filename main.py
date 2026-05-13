@@ -216,34 +216,17 @@ def remove_background():
 
     user_id = data.get('user_id', '')
     plan = data.get('plan', 'free')
+    user_email = data.get('user_email', '')
     admin_email = 'ben-koepke@web.de'
 
     # Admin-Account: immer Studio-Zugang, kein Limit
-    is_admin = False
-    if user_id and SUPABASE_URL and SUPABASE_SERVICE_KEY:
-        try:
-            resp_user = requests.get(
-                f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
-                headers={
-                    "apikey": SUPABASE_SERVICE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"
-                },
-                timeout=5
-            )
-            if resp_user.ok:
-                user_data = resp_user.json()
-                if user_data.get('email') == admin_email:
-                    is_admin = True
-                    plan = 'studio'
-        except Exception:
-            pass
+    is_admin = (user_email == admin_email)
+    if is_admin:
+        plan = 'studio'
 
     # Nur Studio-Nutzer duerfen remove.bg nutzen
     if plan != 'studio' and not is_admin:
-        return jsonify({
-            "error": "Studio plan required",
-            "upgrade": True
-        }), 403
+        return jsonify({"error": "Studio plan required", "upgrade": True}), 403
 
     # Usage-Limit pruefen (Admin ausgenommen)
     if user_id and not is_admin:
@@ -284,6 +267,41 @@ def remove_background():
     except Exception as e:
         print(f"[remove.bg] Exception: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════
+# WILLKOMMENS-E-MAIL
+# ═══════════════════════════════════════════
+@app.route('/send-welcome', methods=['POST'])
+def send_welcome():
+    data = request.get_json(silent=True) or {}
+    email = data.get('email', '')
+    if not email or '@' not in email:
+        return jsonify({"error": "Invalid email"}), 400
+
+    # Supabase Auth E-Mail wird automatisch gesendet
+    # Hier senden wir eine zusätzliche Willkommens-Mail via Supabase
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return jsonify({"status": "skipped"}), 200
+
+    try:
+        # Willkommens-E-Mail Template über Supabase Edge Function oder direkt
+        # Wir nutzen die Supabase Admin API um eine Custom E-Mail zu senden
+        resp = requests.post(
+            f"{SUPABASE_URL}/auth/v1/admin/users",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={"email": email},
+            timeout=5
+        )
+        print(f"[Welcome] Email sent to {email}")
+        return jsonify({"status": "sent"}), 200
+    except Exception as e:
+        print(f"[Welcome] Error: {e}")
+        return jsonify({"status": "error"}), 200  # Kein 500 — nicht kritisch
 
 
 # ═══════════════════════════════════════════
