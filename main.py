@@ -207,31 +207,26 @@ def track_removebg_usage(user_id):
 @app.route('/remove-background', methods=['POST'])
 @limiter.limit("30 per hour")
 def remove_background():
-    if not REMOVEBG_API_KEY:
-        return jsonify({"error": "remove.bg not configured"}), 500
+    if not PHOTOROOM_API_KEY:
+        return jsonify({"error": "Background removal not configured"}), 500
 
     data = request.get_json(silent=True)
     if not data or not data.get('image'):
         return jsonify({"error": "No image provided"}), 400
 
     user_id = data.get('user_id', '')
-    plan = data.get('plan', 'free')
     user_email = data.get('user_email', '')
     ADMIN_EMAILS = ['ben-koepke@web.de', 'metazocker@gmail.com']
     is_admin = user_email in ADMIN_EMAILS
-    if is_admin:
-        plan = 'studio'
 
-    # Nur Studio-Nutzer duerfen remove.bg nutzen
-    if plan != 'studio' and not is_admin:
-        return jsonify({"error": "Studio plan required", "upgrade": True}), 403
-
-    # Usage-Limit pruefen (Admin ausgenommen)
-    if user_id and not is_admin:
+    # Credit-Check (nicht fuer Admins)
+    if not is_admin:
+        if not user_id:
+            return jsonify({"error": "Anmeldung erforderlich", "upgrade": True}), 403
         usage = check_removebg_usage(user_id)
         if usage >= REMOVEBG_MONTHLY_LIMIT:
             return jsonify({
-                "error": f"Monatliches Limit erreicht ({REMOVEBG_MONTHLY_LIMIT} Bilder/Monat im Studio-Plan)",
+                "error": "Kein Credit verfuegbar. Bitte Credits kaufen.",
                 "limit_reached": True,
                 "usage": usage,
                 "limit": REMOVEBG_MONTHLY_LIMIT
@@ -240,18 +235,17 @@ def remove_background():
     try:
         img_bytes = base64.b64decode(data['image'])
         if len(img_bytes) > 12 * 1024 * 1024:
-            return jsonify({"error": "Image too large (max 12MB)"}), 400
+            return jsonify({"error": "Bild zu gross (max 12MB)"}), 400
 
         resp = requests.post(
-            'https://api.remove.bg/v1.0/removebg',
-            files={'image_file': ('image.jpg', img_bytes)},
-            data={'size': 'auto', 'format': 'png'},
-            headers={'X-Api-Key': REMOVEBG_API_KEY},
+            'https://sdk.photoroom.com/v1/segment',
+            headers={'x-api-key': PHOTOROOM_API_KEY},
+            files={'image_file': ('image.jpg', img_bytes, 'image/jpeg')},
             timeout=30
         )
 
         if resp.status_code == 200:
-            if user_id:
+            if user_id and not is_admin:
                 track_removebg_usage(user_id)
             processed_b64 = base64.b64encode(resp.content).decode('utf-8')
             return jsonify({
@@ -260,10 +254,10 @@ def remove_background():
                 "limit": REMOVEBG_MONTHLY_LIMIT
             })
         else:
-            print(f"[remove.bg] Error: {resp.status_code} {resp.text[:200]}")
-            return jsonify({"error": f"remove.bg API error: {resp.status_code}"}), 500
+            print(f"[PhotoRoom] Error: {resp.status_code} {resp.text[:200]}")
+            return jsonify({"error": f"Hintergrundentfernung fehlgeschlagen: {resp.status_code}"}), 500
     except Exception as e:
-        print(f"[remove.bg] Exception: {e}")
+        print(f"[PhotoRoom] Exception: {e}")
         return jsonify({"error": str(e)}), 500
 
 
