@@ -24,7 +24,7 @@ EBAY_ENDPOINT_URL    = os.environ.get('EBAY_ENDPOINT_URL', 'https://web-producti
 SUPABASE_URL         = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
 FRONTEND_URL         = os.environ.get('FRONTEND_URL', 'https://easy2resell.de')
-PHOTOROOM_API_KEY    = os.environ.get('PHOTOROOM_API_KEY', '')
+REMOVEBG_API_KEY     = os.environ.get('REMOVEBG_API_KEY', '')
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
@@ -207,7 +207,7 @@ def track_removebg_usage(user_id):
 @app.route('/remove-background', methods=['POST'])
 @limiter.limit("30 per hour")
 def remove_background():
-    if not PHOTOROOM_API_KEY:
+    if not REMOVEBG_API_KEY:
         return jsonify({"error": "Background removal not configured"}), 500
 
     data = request.get_json(silent=True)
@@ -219,7 +219,6 @@ def remove_background():
     ADMIN_EMAILS = ['ben-koepke@web.de', 'metazocker@gmail.com']
     is_admin = user_email in ADMIN_EMAILS
 
-    # Credit-Check (nicht fuer Admins)
     if not is_admin:
         if not user_id:
             return jsonify({"error": "Anmeldung erforderlich", "upgrade": True}), 403
@@ -238,9 +237,10 @@ def remove_background():
             return jsonify({"error": "Bild zu gross (max 12MB)"}), 400
 
         resp = requests.post(
-            'https://sdk.photoroom.com/v1/segment',
-            headers={'x-api-key': PHOTOROOM_API_KEY},
-            files={'image_file': ('image.jpg', img_bytes, 'image/jpeg')},
+            'https://api.remove.bg/v1.0/removebg',
+            files={'image_file': ('image.jpg', img_bytes)},
+            data={'size': 'auto', 'format': 'png'},
+            headers={'X-Api-Key': REMOVEBG_API_KEY},
             timeout=30
         )
 
@@ -254,10 +254,10 @@ def remove_background():
                 "limit": REMOVEBG_MONTHLY_LIMIT
             })
         else:
-            print(f"[PhotoRoom] Error: {resp.status_code} {resp.text[:200]}")
+            print(f"[remove.bg] Error: {resp.status_code} {resp.text[:200]}")
             return jsonify({"error": f"Hintergrundentfernung fehlgeschlagen: {resp.status_code}"}), 500
     except Exception as e:
-        print(f"[PhotoRoom] Exception: {e}")
+        print(f"[remove.bg] Exception: {e}")
         return jsonify({"error": str(e)}), 500
 
 
