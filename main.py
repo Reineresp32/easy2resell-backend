@@ -24,7 +24,7 @@ EBAY_ENDPOINT_URL    = os.environ.get('EBAY_ENDPOINT_URL', 'https://web-producti
 SUPABASE_URL         = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
 FRONTEND_URL         = os.environ.get('FRONTEND_URL', 'https://easy2resell.de')
-REMOVEBG_API_KEY     = os.environ.get('REMOVEBG_API_KEY', '')
+PHOTOROOM_API_KEY    = os.environ.get('PHOTOROOM_API_KEY', '')
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
@@ -217,10 +217,8 @@ def remove_background():
     user_id = data.get('user_id', '')
     plan = data.get('plan', 'free')
     user_email = data.get('user_email', '')
-    admin_email = 'ben-koepke@web.de'
-
-    # Admin-Account: immer Studio-Zugang, kein Limit
-    is_admin = (user_email == admin_email)
+    ADMIN_EMAILS = ['ben-koepke@web.de', 'metazocker@gmail.com']
+    is_admin = user_email in ADMIN_EMAILS
     if is_admin:
         plan = 'studio'
 
