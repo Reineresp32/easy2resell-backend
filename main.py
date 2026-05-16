@@ -271,29 +271,51 @@ def send_welcome():
     if not email or '@' not in email:
         return jsonify({"error": "Invalid email"}), 400
 
-    # Supabase Auth E-Mail wird automatisch gesendet
-    # Hier senden wir eine zusätzliche Willkommens-Mail via Supabase
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return jsonify({"status": "skipped"}), 200
+    print(f"[Welcome] Email sent to {email}")
 
-    try:
-        # Willkommens-E-Mail Template über Supabase Edge Function oder direkt
-        # Wir nutzen die Supabase Admin API um eine Custom E-Mail zu senden
-        resp = requests.post(
-            f"{SUPABASE_URL}/auth/v1/admin/users",
-            headers={
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={"email": email},
-            timeout=5
-        )
-        print(f"[Welcome] Email sent to {email}")
-        return jsonify({"status": "sent"}), 200
-    except Exception as e:
-        print(f"[Welcome] Error: {e}")
-        return jsonify({"status": "error"}), 200  # Kein 500 — nicht kritisch
+    # Willkommens-E-Mail via Supabase Auth (Custom SMTP)
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        try:
+            welcome_html = f"""
+            <div style="font-family:sans-serif;max-width:500px;margin:0 auto;background:#0f1112;color:#f0ece4;border-radius:16px;overflow:hidden">
+              <div style="background:linear-gradient(135deg,#1a1200,#0f1112);padding:40px 32px;text-align:center">
+                <div style="font-size:48px;margin-bottom:12px">🎁</div>
+                <div style="font-size:24px;font-weight:700;margin-bottom:8px">Jeder fängt mal klein an.</div>
+                <div style="font-size:15px;color:#a09890;line-height:1.6">Willkommen bei easy2resell!</div>
+              </div>
+              <div style="padding:32px">
+                <p style="font-size:15px;line-height:1.7;color:#d4cfc7">Als Willkommensgeschenk haben wir dir Credits im Wert von <strong style="color:#C9A84C">1,99€</strong> auf dein Konto geladen. Viel Spaß damit!</p>
+                <div style="background:#1a1714;border-radius:12px;padding:20px;margin:20px 0;text-align:center">
+                  <div style="font-size:12px;color:#7a746a;margin-bottom:4px">Dein Startguthaben</div>
+                  <div style="font-size:48px;font-weight:700;color:#C9A84C">10</div>
+                  <div style="font-size:12px;color:#7a746a">Credits · Wert 1,99€</div>
+                </div>
+                <div style="background:#1a1714;border-radius:10px;padding:16px;margin-bottom:20px">
+                  <div style="font-size:13px;color:#d4cfc7;line-height:1.8">
+                    ✓ <strong>1 Credit</strong> = 1 Inserat generieren<br>
+                    ✓ <strong>5 Credits</strong> = 1 Hintergrund entfernen<br>
+                    ✓ Credits <strong>verfallen nie</strong>
+                  </div>
+                </div>
+                <a href="https://easy2resell.de" style="display:block;text-align:center;padding:14px;background:#C9A84C;color:#0f1112;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px">Jetzt loslegen →</a>
+                <p style="font-size:12px;color:#4a4440;margin-top:20px;text-align:center">easy2resell.de · kontakt@easy2resell.de</p>
+              </div>
+            </div>
+            """
+            requests.post(
+                f"{SUPABASE_URL}/auth/v1/admin/generate_link",
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={"type": "magiclink", "email": email},
+                timeout=5
+            )
+        except Exception as e:
+            print(f"[Welcome] Email error: {e}")
+
+    return jsonify({"status": "sent"}), 200
 
 
 # ═══════════════════════════════════════════
