@@ -69,6 +69,70 @@ def health():
 # ═══════════════════════════════════════════
 # ANALYZE ENDPOINT
 # ═══════════════════════════════════════════
+ADMIN_EMAILS = ['ben-koepke@web.de', 'metazocker@gmail.com']
+
+def get_credit_balance(user_id):
+    """Gibt den Credit-Stand eines Nutzers zurück."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not user_id:
+        return None
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/credits?user_id=eq.{user_id}&select=balance",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"
+            },
+            timeout=5
+        )
+        data = resp.json()
+        if data and len(data) > 0:
+            return data[0].get('balance', 0)
+        return 0
+    except Exception as e:
+        print(f"[Credits] get_balance error: {e}")
+        return None
+
+def deduct_credits(user_id, amount, description):
+    """Zieht Credits ab. Gibt True zurück wenn erfolgreich."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not user_id:
+        return False
+    try:
+        # Aktuellen Stand holen
+        balance = get_credit_balance(user_id)
+        if balance is None or balance < amount:
+            return False
+
+        new_balance = balance - amount
+
+        # Balance updaten
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/credits?user_id=eq.{user_id}",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            },
+            json={"balance": new_balance, "updated_at": datetime.now().isoformat()},
+            timeout=5
+        )
+
+        # Transaktion loggen
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/credit_transactions",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={"user_id": user_id, "amount": -amount, "type": "deduct", "description": description},
+            timeout=5
+        )
+        return True
+    except Exception as e:
+        print(f"[Credits] deduct error: {e}")
+        return False
+
 @app.route('/analyze', methods=['POST'])
 @limiter.limit("20 per minute")
 @limiter.limit("100 per hour")
@@ -84,6 +148,17 @@ def analyze():
     images = data.get('images', [])
     plan = data.get('plan', 'normal')
     custom_prompt = data.get('customPrompt', '')
+    user_id = data.get('user_id', '')
+    user_email = data.get('user_email', '')
+    is_guest = data.get('is_guest', False)
+
+    # Credit-Check (nicht für Admins und nicht für Gast-Demo)
+    if not is_guest and user_email not in ADMIN_EMAILS:
+        if not user_id:
+            return jsonify({"error": "Anmeldung erforderlich", "auth_required": True}), 401
+        ok = deduct_credits(user_id, 1, '1 Analyse')
+        if not ok:
+            return jsonify({"error": "Nicht genug Credits", "credits_required": True}), 402
 
     if not images:
         return jsonify({"error": "No images provided"}), 400
@@ -264,6 +339,35 @@ def remove_background():
 # ═══════════════════════════════════════════
 # WILLKOMMENS-E-MAIL
 # ═══════════════════════════════════════════
+@app.route('/delete-account', methods=['POST'])
+def delete_account():
+    data = request.get_json(silent=True) or {}
+    user_id = data.get('user_id', '')
+    user_email = data.get('user_email', '')
+
+    if not user_id or not SUPABASE_SERVICE_KEY:
+        return jsonify({"error": "Invalid request"}), 400
+
+    try:
+        resp = requests.delete(
+            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+            headers={
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"
+            },
+            timeout=10
+        )
+        if resp.status_code in [200, 204]:
+            print(f"[Account] Deleted: {user_email}")
+            return jsonify({"status": "deleted"}), 200
+        else:
+            print(f"[Account] Delete error: {resp.status_code} {resp.text}")
+            return jsonify({"error": "Delete failed"}), 500
+    except Exception as e:
+        print(f"[Account] Delete exception: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/send-welcome', methods=['POST'])
 def send_welcome():
     data = request.get_json(silent=True) or {}
