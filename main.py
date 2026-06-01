@@ -44,9 +44,10 @@ limiter = Limiter(
 # ═══════════════════════════════════════════
 @app.after_request
 def add_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Origin'] = FRONTEND_URL
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Vary'] = 'Origin'
     return response
 
 @app.route('/', defaults={'path': ''}, methods=['OPTIONS'])
@@ -70,6 +71,27 @@ def health():
 # ANALYZE ENDPOINT
 # ═══════════════════════════════════════════
 ADMIN_EMAILS = ['ben-koepke@web.de', 'metazocker@gmail.com']
+
+def verify_token(req):
+    """Verifiziert den Supabase-Login-Token aus dem Authorization-Header und
+    gibt (user_id, email) der ECHTEN Identitaet zurueck — oder (None, None).
+    Dadurch koennen user_id / user_email / is_guest aus dem Body NICHT mehr
+    gefaelscht werden (sonst koennte jeder gratis die KI nutzen)."""
+    auth = req.headers.get('Authorization', '')
+    if not auth or not auth.startswith('Bearer ') or not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return None, None
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": auth},
+            timeout=5
+        )
+        if r.status_code == 200:
+            u = r.json()
+            return u.get('id'), (u.get('email') or '')
+    except Exception as e:
+        print(f"[Auth] verify error: {e}")
+    return None, None
 
 def get_credit_balance(user_id):
     """Gibt den Credit-Stand eines Nutzers zurück."""
@@ -148,17 +170,23 @@ def analyze():
     images = data.get('images', [])
     plan = data.get('plan', 'normal')
     custom_prompt = data.get('customPrompt', '')
-    user_id = data.get('user_id', '')
-    user_email = data.get('user_email', '')
     is_guest = data.get('is_guest', False)
 
-    # Credit-Check (nicht für Admins und nicht für Gast-Demo)
-    if not is_guest and user_email not in ADMIN_EMAILS:
-        if not user_id:
-            return jsonify({"error": "Anmeldung erforderlich", "auth_required": True}), 401
-        ok = deduct_credits(user_id, 1, '1 Analyse')
-        if not ok:
-            return jsonify({"error": "Nicht genug Credits", "credits_required": True}), 402
+    # ECHTE Identität aus dem Login-Token holen (Body-Angaben sind fälschbar!)
+    user_id, user_email = verify_token(request)
+
+    if user_id:
+        # Eingeloggt: Admins zahlen nichts, alle anderen 1 Credit
+        if user_email not in ADMIN_EMAILS:
+            ok = deduct_credits(user_id, 1, '1 Analyse')
+            if not ok:
+                return jsonify({"error": "Nicht genug Credits", "credits_required": True}), 402
+    elif is_guest:
+        # Gast-Demo ohne Login: kostenlos, nur durch Rate-Limit gebremst
+        pass
+    else:
+        # Kein gültiger Token und kein Gast → abgelehnt
+        return jsonify({"error": "Anmeldung erforderlich", "auth_required": True}), 401
 
     if not images:
         return jsonify({"error": "No images provided"}), 400
@@ -289,10 +317,9 @@ def remove_background():
     if not data or not data.get('image'):
         return jsonify({"error": "No image provided"}), 400
 
-    user_id = data.get('user_id', '')
-    user_email = data.get('user_email', '')
-    ADMIN_EMAILS = ['ben-koepke@web.de', 'metazocker@gmail.com']
-    is_admin = user_email in ADMIN_EMAILS
+    # ECHTE Identität aus dem Login-Token (nicht aus dem fälschbaren Body!)
+    user_id, user_email = verify_token(request)
+    is_admin = bool(user_email and user_email in ADMIN_EMAILS)
 
     if not is_admin:
         if not user_id:
