@@ -93,6 +93,22 @@ def verify_token(req):
         print(f"[Auth] verify error: {e}")
     return None, None
 
+def is_maintenance_active():
+    """Liest den Wartungsmodus aus site_settings (id=1)."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return False
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/site_settings?id=eq.1&select=maintenance_mode",
+            headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+            timeout=5
+        )
+        d = r.json()
+        return bool(d and d[0].get('maintenance_mode'))
+    except Exception as e:
+        print(f"[Maintenance] check error: {e}")
+        return False
+
 def get_credit_balance(user_id):
     """Gibt den Credit-Stand eines Nutzers zurück."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not user_id:
@@ -174,6 +190,10 @@ def analyze():
 
     # ECHTE Identität aus dem Login-Token holen (Body-Angaben sind fälschbar!)
     user_id, user_email = verify_token(request)
+
+    # Wartungsmodus: blockiert ALLE außer Admins (server-seitig, nicht umgehbar)
+    if (user_email not in ADMIN_EMAILS) and is_maintenance_active():
+        return jsonify({"error": "Wartungsmodus aktiv — gleich wieder verfügbar.", "maintenance": True}), 503
 
     if user_id:
         # Eingeloggt: Admins zahlen nichts, alle anderen 1 Credit
@@ -320,6 +340,10 @@ def remove_background():
     # ECHTE Identität aus dem Login-Token (nicht aus dem fälschbaren Body!)
     user_id, user_email = verify_token(request)
     is_admin = bool(user_email and user_email in ADMIN_EMAILS)
+
+    # Wartungsmodus: blockiert alle außer Admins
+    if not is_admin and is_maintenance_active():
+        return jsonify({"error": "Wartungsmodus aktiv — gleich wieder verfügbar.", "maintenance": True}), 503
 
     if not is_admin:
         if not user_id:
