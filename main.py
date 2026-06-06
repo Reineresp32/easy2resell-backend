@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 import google.generativeai as genai
 import base64
 import os
@@ -8,6 +9,9 @@ import requests
 from datetime import datetime
 
 app = Flask(__name__)
+# Hinter Railways Proxy: echte Client-IP aus X-Forwarded-For nehmen,
+# damit das Rate-Limiting PRO NUTZER greift (sonst teilen sich alle eine IP).
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 # ═══════════════════════════════════════════
 # CONFIG — alle Keys kommen aus Railway Env Vars
@@ -55,7 +59,7 @@ def health():
     return jsonify({
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "4.1"
+        "version": "4.2"
     })
 
 # ═══════════════════════════════════════════
@@ -227,8 +231,9 @@ def analyze():
 
     # Modellwahl server-seitig: das faelschbare 'plan'-Feld aus dem Body wird
     # NICHT genutzt (sonst koennte jeder gratis das teure Pro-Modell anfordern).
-    # Pro-Modell nur fuer Admins; echte Pro-Abos spaeter hier server-seitig pruefen.
-    model_name = 'gemini-2.5-pro' if is_admin else 'gemini-2.5-flash'
+    # Pro-Modell deaktiviert (gemini-2.5-pro hat zu strenge Quota -> 429).
+    # Einheitlich flash; bei echtem Pro-Abo + Quota spaeter wieder differenzieren.
+    model_name = 'gemini-2.5-flash'
 
     try:
         # Schritt 1: Artikel identifizieren
