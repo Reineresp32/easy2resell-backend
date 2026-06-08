@@ -181,7 +181,8 @@ def analyze():
     images = data.get('images', [])
     custom_prompt = data.get('customPrompt', '')
     is_guest = data.get('is_guest', False)
-
+    is_refine = data.get('is_refine', False)
+    
     # ECHTE Identität aus dem Login-Token holen (Body-Angaben sind fälschbar!)
     # user_id / user_email / plan / is_guest aus dem Body werden NICHT vertraut.
     user_id, user_email = verify_token(request)
@@ -193,7 +194,7 @@ def analyze():
 
     if user_id:
         # Eingeloggt: Admins zahlen nichts, alle anderen 1 Credit
-        if not is_admin:
+        if not is_admin and not is_refine:
             ok = deduct_credits(user_id, 1, '1 Analyse')
             if not ok:
                 return jsonify({"error": "Nicht genug Credits", "credits_required": True}), 402
