@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from apple_iap import register_iap, user_is_pro
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -87,6 +88,8 @@ def verify_token(req):
     except Exception as e:
         print(f"[Auth] verify error: {e}")
     return None, None
+
+register_iap(app, verify_token)
 
 def is_maintenance_active():
     """Liest den Wartungsmodus aus site_settings (id=1)."""
@@ -187,14 +190,15 @@ def analyze():
     # user_id / user_email / plan / is_guest aus dem Body werden NICHT vertraut.
     user_id, user_email = verify_token(request)
     is_admin = bool(user_email and user_email in ADMIN_EMAILS)
+    is_pro   = user_is_pro(user_id) if (user_id and not is_admin) else False
 
     # Wartungsmodus: blockiert ALLE außer Admins (server-seitig, nicht umgehbar)
     if not is_admin and is_maintenance_active():
         return jsonify({"error": "Wartungsmodus aktiv — gleich wieder verfügbar.", "maintenance": True}), 503
 
     if user_id:
-        # Eingeloggt: Admins zahlen nichts, alle anderen 1 Credit
-        if not is_admin and not is_refine:
+        # Admins und Pro-Nutzer zahlen nichts; Refine ist gratis
+        if not is_admin and not is_pro and not is_refine:
             ok = deduct_credits(user_id, 1, '1 Analyse')
             if not ok:
                 return jsonify({"error": "Nicht genug Credits", "credits_required": True}), 402
@@ -230,11 +234,8 @@ def analyze():
         except Exception:
             return jsonify({"error": "Invalid image data"}), 400
 
-    # Modellwahl server-seitig: das faelschbare 'plan'-Feld aus dem Body wird
-    # NICHT genutzt (sonst koennte jeder gratis das teure Pro-Modell anfordern).
-    # Pro-Modell deaktiviert (gemini-2.5-pro hat zu strenge Quota -> 429).
-    # Einheitlich flash; bei echtem Pro-Abo + Quota spaeter wieder differenzieren.
-    model_name = 'gemini-2.5-flash'
+    # Modellwahl server-seitig: Pro-Nutzer und Admins erhalten das stärkere Modell.
+    model_name = 'gemini-2.5-pro' if (is_admin or is_pro) else 'gemini-2.5-flash'
 
     try:
         # Schritt 1: Artikel identifizieren
