@@ -66,7 +66,8 @@ def health():
 # ═══════════════════════════════════════════
 # ANALYZE ENDPOINT
 # ═══════════════════════════════════════════
-ADMIN_EMAILS = ['ben-koepke@web.de', 'metazocker@gmail.com']
+_admin_env = os.environ.get('ADMIN_EMAILS', '')
+ADMIN_EMAILS = [e.strip() for e in _admin_env.split(',') if e.strip()]
 
 def verify_token(req):
     """Verifiziert den Supabase-Login-Token aus dem Authorization-Header und
@@ -89,7 +90,7 @@ def verify_token(req):
         print(f"[Auth] verify error: {e}")
     return None, None
 
-register_iap(app, verify_token)
+register_iap(app, verify_token, limiter)
 
 def is_maintenance_active():
     """Liest den Wartungsmodus aus site_settings (id=1)."""
@@ -129,42 +130,24 @@ def get_credit_balance(user_id):
         return None
 
 def deduct_credits(user_id, amount, description):
-    """Zieht Credits ab. Gibt True zurück wenn erfolgreich."""
+    """Zieht Credits atomar ab via Supabase RPC (kein Race-Condition-Risiko)."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not user_id:
         return False
     try:
-        # Aktuellen Stand holen
-        balance = get_credit_balance(user_id)
-        if balance is None or balance < amount:
-            return False
-
-        new_balance = balance - amount
-
-        # Balance updaten
-        requests.patch(
-            f"{SUPABASE_URL}/rest/v1/credits?user_id=eq.{user_id}",
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/deduct_credits",
             headers={
                 "apikey": SUPABASE_SERVICE_KEY,
                 "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                 "Content-Type": "application/json",
-                "Prefer": "return=minimal"
             },
-            json={"balance": new_balance, "updated_at": datetime.now().isoformat()},
+            json={"p_user_id": user_id, "p_amount": amount, "p_description": description},
             timeout=5
         )
-
-        # Transaktion loggen
-        requests.post(
-            f"{SUPABASE_URL}/rest/v1/credit_transactions",
-            headers={
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={"user_id": user_id, "amount": -amount, "type": "deduct", "description": description},
-            timeout=5
-        )
-        return True
+        if r.status_code not in (200, 204):
+            print(f"[Credits] deduct RPC failed: {r.status_code} {r.text[:200]}")
+            return False
+        return r.json() is True or r.json() == True
     except Exception as e:
         print(f"[Credits] deduct error: {e}")
         return False
@@ -293,7 +276,7 @@ Antworte NUR mit einem JSON-Objekt (kein Markdown):
         print(f"[ERROR] {datetime.utcnow().isoformat()} - {error_msg}")
         if 'quota' in error_msg.lower() or '429' in error_msg:
             return jsonify({"error": "Rate limit reached, please try again later"}), 429
-        return jsonify({"error": "Analysis failed: " + error_msg}), 500
+        return jsonify({"error": "Analyse fehlgeschlagen. Bitte versuche es erneut."}), 500
 
 
 # ═══════════════════════════════════════════
@@ -398,7 +381,7 @@ def remove_background():
             return jsonify({"error": f"Hintergrundentfernung fehlgeschlagen: {resp.status_code}"}), 500
     except Exception as e:
         print(f"[remove.bg] Exception: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Hintergrundentfernung fehlgeschlagen. Bitte versuche es erneut."}), 500
 
 
 # ═══════════════════════════════════════════

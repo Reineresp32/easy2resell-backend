@@ -147,75 +147,86 @@ def _norm_uuid(x):
     return str(x).replace('-', '').lower() if x else ''
 
 
-def register_iap(app, verify_token):
+def register_iap(app, verify_token, limiter=None):
     """Hängt /apple/redeem an die Flask-App. `verify_token(request) -> (user_id, email)`."""
 
-    @app.route('/apple/redeem', methods=['POST'])
-    def apple_redeem():
-        # 1) Echte Identität aus dem Login-Token (Body ist fälschbar)
-        user_id, user_email = verify_token(request)
-        if not user_id:
-            return jsonify({"error": "Anmeldung erforderlich"}), 401
+    def apple_redeem_handler():
+        return _apple_redeem_impl(verify_token)
 
-        data = request.get_json(silent=True) or {}
-        jws = data.get('jws') or data.get('signedTransaction')
-        if not jws:
-            return jsonify({"error": "Keine Transaktion übergeben"}), 400
+    view = apple_redeem_handler
+    if limiter:
+        view = limiter.limit("30 per hour")(view)
+        view = limiter.limit("10 per minute")(view)
+    view.__name__ = 'apple_redeem'
+    app.route('/apple/redeem', methods=['POST'])(view)
 
-        # 2) Von Apple signierte Transaktion verifizieren
-        try:
-            txn = _verify_transaction(jws)
-        except Exception as e:
-            print(f"[IAP] Verify failed: {e}")
-            return jsonify({"error": "Transaktion nicht verifizierbar"}), 400
 
-        product_id     = getattr(txn, 'product_id', None)
-        transaction_id = getattr(txn, 'transaction_id', None)
-        aat            = getattr(txn, 'app_account_token', None)
-        if not product_id or not transaction_id:
-            return jsonify({"error": "Unvollständige Transaktion"}), 400
+def _apple_redeem_impl(verify_token):
+    # 1) Echte Identität aus dem Login-Token (Body ist fälschbar)
+    user_id, user_email = verify_token(request)
+    if not user_id:
+        return jsonify({"error": "Anmeldung erforderlich"}), 401
 
-        # 3) appAccountToken (falls gesetzt) muss zum eingeloggten Konto passen
-        if aat and _norm_uuid(aat) != _norm_uuid(user_id):
-            print(f"[IAP] appAccountToken mismatch: txn={aat} user={user_id}")
-            return jsonify({"error": "Transaktion gehört zu einem anderen Konto"}), 403
+    data = request.get_json(silent=True) or {}
+    jws = data.get('jws') or data.get('signedTransaction')
+    if not jws:
+        return jsonify({"error": "Keine Transaktion übergeben"}), 400
 
-        # 4) Produkt -> Credits / Pro
-        credits = CREDIT_PRODUCTS.get(product_id, 0)
-        pro_until = None
-        if product_id == PRO_PRODUCT:
-            credits = PRO_MONTHLY_CREDITS
-            exp_ms = getattr(txn, 'expires_date', None)   # ms seit Epoch
-            if exp_ms:
-                pro_until = datetime.fromtimestamp(exp_ms / 1000, tz=timezone.utc).isoformat()
-        if credits == 0 and pro_until is None:
-            return jsonify({"status": "ignored", "balance": _balance(user_id)}), 200
+    # 2) Von Apple signierte Transaktion verifizieren
+    try:
+        txn = _verify_transaction(jws)
+    except Exception as e:
+        print(f"[IAP] Verify failed: {e}")
+        return jsonify({"error": "Transaktion nicht verifizierbar"}), 400
 
-        # 5) Idempotente Gutschrift in Supabase (RPC bricht bei bereits verarbeiteter
-        #    transactionId ab -> kein Doppel-Gutschreiben)
-        try:
-            r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/apply_apple_purchase",
-                headers=_supabase_headers(),
-                json={
-                    "p_user_id": user_id,
-                    "p_transaction_id": str(transaction_id),
-                    "p_product_id": product_id,
-                    "p_credits": int(credits),
-                    "p_pro_until": pro_until,
-                },
-                timeout=8)
-            if r.status_code not in (200, 204):
-                print(f"[IAP] RPC failed: {r.status_code} {r.text[:200]}")
-                return jsonify({"error": "Gutschrift fehlgeschlagen"}), 500
-        except Exception as e:
-            print(f"[IAP] RPC error: {e}")
+    product_id     = getattr(txn, 'product_id', None)
+    transaction_id = getattr(txn, 'transaction_id', None)
+    aat            = getattr(txn, 'app_account_token', None)
+    if not product_id or not transaction_id:
+        return jsonify({"error": "Unvollständige Transaktion"}), 400
+
+    # 3) appAccountToken (falls gesetzt) muss zum eingeloggten Konto passen
+    if aat and _norm_uuid(aat) != _norm_uuid(user_id):
+        print(f"[IAP] appAccountToken mismatch: txn={aat} user={user_id}")
+        return jsonify({"error": "Transaktion gehört zu einem anderen Konto"}), 403
+
+    # 4) Produkt -> Credits / Pro
+    credits = CREDIT_PRODUCTS.get(product_id, 0)
+    pro_until = None
+    if product_id == PRO_PRODUCT:
+        credits = PRO_MONTHLY_CREDITS
+        exp_ms = getattr(txn, 'expires_date', None)
+        if exp_ms:
+            pro_until = datetime.fromtimestamp(exp_ms / 1000, tz=timezone.utc).isoformat()
+    if credits == 0 and pro_until is None:
+        return jsonify({"status": "ignored", "balance": _balance(user_id)}), 200
+
+    # 5) Idempotente Gutschrift in Supabase
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/apply_apple_purchase",
+            headers=_supabase_headers(),
+            json={
+                "p_user_id": user_id,
+                "p_transaction_id": str(transaction_id),
+                "p_product_id": product_id,
+                "p_credits": int(credits),
+                "p_pro_until": pro_until,
+            },
+            timeout=8)
+        if r.status_code not in (200, 204):
+            print(f"[IAP] RPC failed: {r.status_code} {r.text[:200]}")
             return jsonify({"error": "Gutschrift fehlgeschlagen"}), 500
+    except Exception as e:
+        print(f"[IAP] RPC error: {e}")
+        return jsonify({"error": "Gutschrift fehlgeschlagen"}), 500
 
-        print(f"[IAP] redeemed product={product_id} txn={transaction_id} user={user_id[:8]}")
-        return jsonify({
-            "status": "ok",
-            "product": product_id,
-            "balance": _balance(user_id),
-            "pro": user_is_pro(user_id),
-        }), 200
+    print(f"[IAP] redeemed product={product_id} txn={transaction_id} user={user_id[:8]}")
+    return jsonify({
+        "status": "ok",
+        "product": product_id,
+        "balance": _balance(user_id),
+        "pro": user_is_pro(user_id),
+    }), 200
+
+
